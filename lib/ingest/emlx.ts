@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { simpleParser } from "mailparser";
+import { pickHeadersFromLines } from "../parse/headers";
 import {
   ingestMessage,
   emptySummary,
@@ -154,6 +155,7 @@ export async function backfillFromAppleMail(
         date: parsed.date?.toISOString(),
         text,
         html: html || undefined,
+        headers: pickHeadersFromLines(parsed.headerLines),
       });
       tally(summary, outcome);
       opts.onProgress?.(summary);

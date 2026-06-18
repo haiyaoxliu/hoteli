@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/client";
 import { users } from "../db/schema";
 import { tagFromRecipient } from "./alias";
+import { pickHeadersFromPairs } from "../parse/headers";
 import {
   ingestMessage,
   emptySummary,
@@ -131,6 +132,7 @@ export async function syncGmail(maxMessages = 50): Promise<IngestSummary> {
         date: header(msg, "date"),
         text: bodies.text,
         html: bodies.html || undefined,
+        headers: pickHeadersFromPairs(msg.payload?.headers ?? []),
       });
       tally(summary, outcome);
     }

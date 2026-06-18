@@ -1,9 +1,9 @@
-import { and, eq, like } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/client";
 import { rawMessages, properties, stays } from "../db/schema";
 import { parseStay, type ParsedStay } from "../parse";
-import { isRentalChannel } from "../parse/heuristic";
-import { getGeoProvider } from "../geo";
+import { isRentalChannel, isComplete } from "../parse/heuristic";
+import { geocodeBest } from "../geo";
 import { upsertProperty } from "../properties";
 
 export interface IngestInput {
@@ -16,6 +16,7 @@ export interface IngestInput {
   date?: string;
   text: string;
   html?: string;
+  headers?: Record<string, string>;
 }
 
 export type IngestOutcome =
@@ -26,55 +27,21 @@ export type IngestOutcome =
   | "needs_review"
   | "failed";
 
-function dedupKeyFor(name: string, city?: string | null): string {
-  return [name, city ?? ""].join("|").toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-/** A listing title (vacation rental) rather than a geocodable hotel name. */
-function looksLikeListing(name: string): boolean {
-  return name.length > 45 || /[@/]|\bw\/\b/.test(name);
-}
-
-interface GeoHit {
-  lat: number;
-  lng: number;
-  source: string;
-  address: string | null;
-  country: string | null;
+function norm(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 /**
- * Geocode a parsed hotel. For vacation rentals the listing title won't geocode,
- * so we look up the city instead. Returns null when no location can be found —
- * the caller then routes the message to review. We never log a location-less stay.
+ * A reservation identity used to group copies (thread replies, reminders) for
+ * merging. Confirmation code when present; otherwise the date range, which is
+ * the field most consistently extracted across copies. (Cross-key duplicates —
+ * one copy with a code, another without — are caught by the date-range stay
+ * lookup in reconcileByKey.) Returns null without a check-in.
  */
-async function geocode(parsed: {
-  hotelName: string;
-  city: string | null;
-  country: string | null;
-  channel: ParsedStay["channel"];
-}): Promise<GeoHit | null> {
-  const rental = isRentalChannel(parsed.channel) || looksLikeListing(parsed.hotelName);
-  const query =
-    rental && parsed.city
-      ? [parsed.city, parsed.country].filter(Boolean).join(", ")
-      : [parsed.hotelName, parsed.city, parsed.country].filter(Boolean).join(", ");
-  if (!query) return null;
-  try {
-    const results = await getGeoProvider().search(query);
-    const r = results[0];
-    if (r) {
-      return {
-        lat: r.lat,
-        lng: r.lng,
-        source: rental ? "nominatim-city" : r.source,
-        address: r.address ?? null,
-        country: r.country ?? null,
-      };
-    }
-  } catch {
-    /* network/provider error — treat as no location */
-  }
+function reservationKey(p: ParsedStay): string | null {
+  if (p.confirmationNo) return `conf:${p.confirmationNo.toUpperCase()}`;
+  if (p.checkIn && p.checkOut) return `dates:${p.checkIn}|${p.checkOut}`;
+  if (p.checkIn) return `dates:${p.checkIn}`;
   return null;
 }
 
@@ -113,6 +80,7 @@ export async function ingestMessage(input: IngestInput): Promise<IngestOutcome> 
     date: input.date,
     text: input.text,
     html: input.html,
+    headers: input.headers,
   });
 
   if (!parsed) {
@@ -132,15 +100,16 @@ export async function ingestMessage(input: IngestInput): Promise<IngestOutcome> 
     return "no_match";
   }
 
-  // Persist the parse so the confirmation-keyed reconcile can see this copy.
+  // Persist the parse + reservation key so reconcile can find sibling copies.
+  const key = reservationKey(parsed);
   db.update(rawMessages)
-    .set({ parseJson: JSON.stringify(parsed) })
+    .set({ parseJson: JSON.stringify(parsed), resvKey: key })
     .where(eq(rawMessages.id, raw.id))
     .run();
 
-  // Without a confirmation code we can't dedup/merge across thread copies, and
-  // a stay isn't complete anyway — send to review.
-  if (!parsed.confirmationNo) {
+  // Not enough to identify a reservation (no conf, and missing check-in or any
+  // name/address) — hold for review.
+  if (!key) {
     db.update(rawMessages)
       .set({ parseStatus: "review" })
       .where(eq(rawMessages.id, raw.id))
@@ -148,7 +117,7 @@ export async function ingestMessage(input: IngestInput): Promise<IngestOutcome> 
     return "needs_review";
   }
 
-  return reconcileByConfirmation(input.userId, parsed.confirmationNo, {
+  return reconcileByKey(input.userId, key, {
     source: input.source,
     externalId: input.externalId,
     rawExcerpt: input.text.slice(0, 500),
@@ -167,7 +136,7 @@ function firstTruthy<K extends keyof ParsedStay>(
 }
 
 /** Merge all copies of a reservation into the best single record. */
-function mergeParsed(list: ParsedStay[], conf: string): ParsedStay {
+function mergeParsed(list: ParsedStay[]): ParsedStay {
   // Prefer a copy that has BOTH dates (a real check-in/out pair) over partials.
   const datePair = list.find((p) => p.checkIn && p.checkOut);
   // Prefer a copy with a street address, else any with a city, for location.
@@ -176,12 +145,12 @@ function mergeParsed(list: ParsedStay[], conf: string): ParsedStay {
     isHotelConfirmation: true,
     hotelName: firstTruthy(list, "hotelName"),
     brand: firstTruthy(list, "brand"),
-    address: loc?.address ?? null,
+    address: loc?.address ?? firstTruthy(list, "address"),
     city: loc?.city ?? firstTruthy(list, "city"),
     country: loc?.country ?? firstTruthy(list, "country"),
     checkIn: datePair ? datePair.checkIn : firstTruthy(list, "checkIn"),
     checkOut: datePair ? datePair.checkOut : firstTruthy(list, "checkOut"),
-    confirmationNo: conf,
+    confirmationNo: firstTruthy(list, "confirmationNo"),
     roomType: firstTruthy(list, "roomType"),
     total: firstTruthy(list, "total"),
     currency: firstTruthy(list, "currency"),
@@ -191,39 +160,33 @@ function mergeParsed(list: ParsedStay[], conf: string): ParsedStay {
 }
 
 /**
- * Reconcile every processed copy that shares a confirmation code into a single
- * stay with merged best fields. Promotes the reservation out of review once the
- * combined copies provide name + both dates + a geocodable location; otherwise
- * leaves the (stay-less) copies in review.
+ * Reconcile every processed copy sharing a reservation key into ONE stay with
+ * merged best fields. Logs once the copies provide check-in/out + a name or
+ * address (confirmation code and map pin are optional — geocoding is best-effort
+ * and a stay is still logged without a pin). Otherwise leaves copies in review.
  */
-async function reconcileByConfirmation(
+async function reconcileByKey(
   userId: number,
-  conf: string,
+  key: string,
   origin: { source: string; externalId: string; rawExcerpt: string },
 ): Promise<IngestOutcome> {
   const rows = db
     .select()
     .from(rawMessages)
-    .where(and(eq(rawMessages.userId, userId), like(rawMessages.parseJson, `%${conf}%`)))
+    .where(and(eq(rawMessages.userId, userId), eq(rawMessages.resvKey, key)))
     .all();
 
   const list: ParsedStay[] = [];
   for (const r of rows) {
     if (!r.parseJson) continue;
     try {
-      const p = JSON.parse(r.parseJson) as ParsedStay;
-      if (p.confirmationNo === conf) list.push(p);
+      list.push(JSON.parse(r.parseJson) as ParsedStay);
     } catch {
       /* ignore unparseable */
     }
   }
 
-  const merged = mergeParsed(list, conf);
-  const existingStay = db
-    .select()
-    .from(stays)
-    .where(and(eq(stays.userId, userId), eq(stays.confirmationNo, conf)))
-    .get();
+  const merged = mergeParsed(list);
 
   const markReview = (): IngestOutcome => {
     for (const r of rows) {
@@ -237,57 +200,81 @@ async function reconcileByConfirmation(
     return "needs_review";
   };
 
-  if (!merged.hotelName || !merged.checkIn || !merged.checkOut) return markReview();
+  // Log bar: check-in/out + an identity (name or address). Conf & pin optional.
+  if (!isComplete(merged)) return markReview();
 
-  // Resolve a map location: reuse the stay's property coords, else an existing
-  // property by name+city, else geocode now.
-  let property =
+  // Existing stay for this reservation: a copy already linked to one, else the
+  // same property + check-in (dedups across copies that keyed differently).
+  const linkedId = rows.find((r) => r.stayId != null)?.stayId ?? null;
+  let existingStay =
+    linkedId != null
+      ? db.select().from(stays).where(eq(stays.id, linkedId)).get() ?? null
+      : null;
+
+  // Cross-key dedup: an existing stay with the same date range is the same
+  // reservation (copies that keyed by code vs dates still collapse). Guard
+  // against merging two genuinely different hotels on the same dates by
+  // requiring the city to match when both are known.
+  if (!existingStay && merged.checkIn && merged.checkOut) {
+    const sameDates = db
+      .select({ s: stays, city: properties.city })
+      .from(stays)
+      .leftJoin(properties, eq(properties.id, stays.propertyId))
+      .where(
+        and(
+          eq(stays.userId, userId),
+          eq(stays.checkIn, merged.checkIn),
+          eq(stays.checkOut, merged.checkOut),
+        ),
+      )
+      .all();
+    const match = sameDates.find(
+      (c) => !c.city || !merged.city || norm(c.city) === norm(merged.city),
+    );
+    existingStay = match?.s ?? null;
+  }
+
+  // Find-or-create the property (deduped by name+city); coords best-effort.
+  const propName = merged.hotelName ?? merged.address ?? "Stay";
+  const property =
     (existingStay?.propertyId
       ? db.select().from(properties).where(eq(properties.id, existingStay.propertyId)).get()
       : undefined) ??
-    db
-      .select()
-      .from(properties)
-      .where(eq(properties.dedupKey, dedupKeyFor(merged.hotelName, merged.city)))
-      .get();
-
-  let hasCoords = !!property && property.lat != null && property.lng != null;
-  if (!hasCoords) {
-    const hit = await geocode({
-      hotelName: merged.hotelName,
+    upsertProperty({
+      name: propName,
+      brand: merged.brand,
+      address: merged.address,
       city: merged.city,
       country: merged.country,
-      channel: merged.channel,
+      lat: null,
+      lng: null,
+      geoSource: null,
     });
-    if (!hit) return markReview();
-    if (!property) {
-      property = upsertProperty({
-        name: merged.hotelName,
-        brand: merged.brand,
-        address: merged.address ?? hit.address,
-        city: merged.city,
-        country: merged.country ?? hit.country,
-        lat: hit.lat,
-        lng: hit.lng,
-        geoSource: hit.source,
-      });
-    } else {
+
+  // Best-effort geocode if we don't already have coordinates.
+  if (property.lat == null || property.lng == null) {
+    const hit = await geocodeBest({
+      address: merged.address,
+      name: merged.hotelName,
+      city: merged.city,
+      country: merged.country,
+      rental: isRentalChannel(merged.channel),
+    });
+    if (hit) {
       db.update(properties)
         .set({
           lat: hit.lat,
           lng: hit.lng,
           geoSource: hit.source,
           address: property.address ?? merged.address ?? hit.address,
-          city: property.city ?? merged.city,
+          city: property.city ?? merged.city ?? hit.city,
+          country: property.country ?? merged.country ?? hit.country,
         })
         .where(eq(properties.id, property.id))
         .run();
     }
-    hasCoords = true;
   }
-  if (!property || !hasCoords) return markReview();
 
-  // Create or update the single stay for this confirmation with merged fields.
   let stayId: number;
   let created = false;
   if (existingStay) {
@@ -296,6 +283,7 @@ async function reconcileByConfirmation(
         propertyId: property.id,
         checkIn: merged.checkIn,
         checkOut: merged.checkOut,
+        confirmationNo: merged.confirmationNo ?? existingStay.confirmationNo,
         channel: merged.channel,
         roomType: merged.roomType,
         total: merged.total,
@@ -312,7 +300,7 @@ async function reconcileByConfirmation(
         propertyId: property.id,
         checkIn: merged.checkIn,
         checkOut: merged.checkOut,
-        confirmationNo: conf,
+        confirmationNo: merged.confirmationNo,
         roomType: merged.roomType,
         total: merged.total,
         currency: merged.currency,
@@ -328,7 +316,6 @@ async function reconcileByConfirmation(
     created = true;
   }
 
-  // All copies of this reservation now resolve to the one stay.
   for (const r of rows) {
     db.update(rawMessages)
       .set({ parseStatus: "parsed", stayId })

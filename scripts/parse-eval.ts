@@ -1,9 +1,10 @@
 /**
  * Offline evaluation of the deterministic parser against the local Apple Mail
- * store. No LLM, no DB writes — just measures coverage and gate behaviour.
+ * store. No DB writes.
  *
- *   npm run parse-eval            # summary
- *   npm run parse-eval -- --show  # + per-message table
+ *   npm run parse-eval                 # precision/coverage summary
+ *   npm run parse-eval -- --show       # + per-message tables
+ *   npm run parse-eval -- --geo 20     # also test geocoding on N logged stays
  *
  * Requires Full Disk Access for the terminal on macOS.
  */
@@ -11,10 +12,13 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { simpleParser } from "mailparser";
-import { extractStayHeuristic } from "../lib/parse/heuristic";
+import { extractStayHeuristic, isComplete } from "../lib/parse/heuristic";
+import { isBulk, pickHeadersFromLines } from "../lib/parse/headers";
+import { geocodeBest } from "../lib/geo";
+import { isRentalChannel } from "../lib/parse/heuristic";
 
 const KW =
-  /\b(reservation|confirmation|confirmed|booking|itinerary|check[- ]?in|your stay|booking\.com|expedia|hotels?\.com|airbnb|marriott|hilton|hyatt|ihg|accor)\b/i;
+  /\b(reservation|confirmation|confirmed|booking|itinerary|check[- ]?in|your stay|hotel|airbnb|expedia|booking\.com|hotels?\.com|marriott|hilton|hyatt)\b/i;
 
 function emlxToRfc822(buf: Buffer): Buffer | null {
   const nl = buf.indexOf(0x0a);
@@ -23,7 +27,6 @@ function emlxToRfc822(buf: Buffer): Buffer | null {
   if (!Number.isFinite(n) || n <= 0) return null;
   return buf.subarray(nl + 1, nl + 1 + n);
 }
-
 function* walk(root: string): Generator<string> {
   let entries: fs.Dirent[];
   try {
@@ -40,16 +43,18 @@ function* walk(root: string): Generator<string> {
 
 async function main() {
   const show = process.argv.includes("--show");
+  const geoIdx = process.argv.indexOf("--geo");
+  const geoN = geoIdx >= 0 ? Number(process.argv[geoIdx + 1] || 20) : 0;
   const root = path.join(os.homedir(), "Library", "Mail");
 
   let candidates = 0,
-    gatePass = 0,
-    complete = 0,
-    nameHit = 0,
-    dateHit = 0,
-    confHit = 0,
-    rejected = 0;
-  const rows: string[] = [];
+    rejectedBulk = 0,
+    rejectedOther = 0,
+    logged = 0,
+    review = 0;
+  const loggedRows: string[] = [];
+  const reviewRows: string[] = [];
+  const loggedStays: ReturnType<typeof extractStayHeuristic>[] = [];
 
   for (const file of walk(root)) {
     let raw: Buffer;
@@ -63,57 +68,72 @@ async function main() {
     if (!KW.test(msg.subarray(0, 8192).toString("utf8"))) continue;
     candidates++;
 
-    let parsed;
+    let p;
     try {
-      parsed = await simpleParser(msg);
+      p = await simpleParser(msg);
     } catch {
       continue;
     }
-    const html = typeof parsed.html === "string" ? parsed.html : "";
-    const text = parsed.text || html.replace(/<[^>]+>/g, " ");
+    const html = typeof p.html === "string" ? p.html : "";
+    const text = p.text || html.replace(/<[^>]+>/g, " ");
+    const headers = pickHeadersFromLines(p.headerLines);
     const s = extractStayHeuristic({
-      subject: parsed.subject,
-      from: parsed.from?.text,
+      subject: p.subject,
+      from: p.from?.text,
       text,
       html: html || undefined,
+      headers,
+      date: p.date?.toISOString(),
     });
 
     if (!s.isHotelConfirmation) {
-      rejected++;
-    } else {
-      gatePass++;
-      if (s.hotelName) nameHit++;
-      if (s.checkIn) dateHit++;
-      if (s.confirmationNo) confHit++;
-      if (s.hotelName && s.checkIn && s.checkOut && s.confirmationNo) complete++;
+      if (isBulk(headers, p.from?.text)) rejectedBulk++;
+      else rejectedOther++;
+      continue;
     }
-
-    if (show && (s.isHotelConfirmation || /reservation|confirmed|booking/i.test(parsed.subject || ""))) {
-      rows.push(
-        [
-          (s.isHotelConfirmation ? "✓" : "✗").padEnd(2),
-          (parsed.subject || "").slice(0, 44).padEnd(44),
-          (s.hotelName || "-").slice(0, 24).padEnd(24),
-          (s.checkIn || "-").padEnd(10),
-          (s.confirmationNo || "-").slice(0, 12).padEnd(12),
-          s.channel || "-",
-        ].join(" | "),
-      );
+    const row = `${(p.subject || "").slice(0, 40).padEnd(40)} | ${(s.hotelName || "-").slice(0, 22).padEnd(22)} | ${s.checkIn || "-"}→${s.checkOut || "-"} | ${(s.address || "-").slice(0, 28)}`;
+    if (isComplete(s)) {
+      logged++;
+      loggedStays.push(s);
+      if (loggedRows.length < 40) loggedRows.push(row);
+    } else {
+      review++;
+      if (reviewRows.length < 40) reviewRows.push(row);
     }
   }
 
-  console.log("=== Deterministic parser eval (local Apple Mail) ===");
-  console.log(`keyword candidates:        ${candidates}`);
-  console.log(`gate: confirmation:        ${gatePass}   rejected (promo/other): ${rejected}`);
-  console.log(`of confirmations:`);
-  console.log(`  hotel name extracted:    ${nameHit}/${gatePass}`);
-  console.log(`  check-in date extracted: ${dateHit}/${gatePass}`);
-  console.log(`  confirmation # extracted:${confHit}/${gatePass}`);
-  console.log(`  complete (name+dates+conf):${complete}/${gatePass}  -> eligible to log (still needs a geocode hit at ingest)`);
-  console.log(`  -> needs manual review:  ${gatePass - complete}`);
+  console.log("=== Parser eval (local Apple Mail) ===");
+  console.log(`keyword candidates:   ${candidates}`);
+  console.log(`rejected (bulk/mktg): ${rejectedBulk}`);
+  console.log(`rejected (other):     ${rejectedOther}`);
+  console.log(`LOGGED (complete):    ${logged}`);
+  console.log(`review (incomplete):  ${review}`);
+
   if (show) {
-    console.log("\n gate | subject | hotel | check-in | conf | channel");
-    rows.slice(0, 40).forEach((r) => console.log("  " + r));
+    console.log("\n--- LOGGED ---\n  subject | name | dates | address");
+    loggedRows.forEach((r) => console.log("  " + r));
+    console.log("\n--- REVIEW ---");
+    reviewRows.forEach((r) => console.log("  " + r));
+  }
+
+  if (geoN > 0) {
+    console.log(`\n=== Geocoding test (first ${geoN} logged) ===`);
+    let hit = 0;
+    const sample = loggedStays.slice(0, geoN);
+    for (const s of sample) {
+      const g = await geocodeBest({
+        address: s.address,
+        name: s.hotelName,
+        city: s.city,
+        country: s.country,
+        rental: isRentalChannel(s.channel),
+      });
+      if (g) hit++;
+      console.log(
+        `  ${g ? "✓" : "✗"} ${(s.hotelName || s.address || "?").slice(0, 34).padEnd(34)} ${g ? `(${g.source})` : ""}`,
+      );
+    }
+    console.log(`geo hit-rate: ${hit}/${sample.length}`);
   }
   process.exit(0);
 }

@@ -85,10 +85,16 @@ export const rawMessages = sqliteTable(
     receivedAt: integer("received_at"),
     parseStatus: text("parse_status").notNull().default("pending"), // pending|parsed|review|failed|skipped|no_match
     parseJson: text("parse_json"),
+    // Reservation identity for cross-copy merge: conf code, else address|checkin
+    // or name|checkin. Copies sharing this collapse into one stay.
+    resvKey: text("resv_key"),
     stayId: integer("stay_id").references(() => stays.id),
     createdAt: integer("created_at").notNull(),
   },
-  (t) => [uniqueIndex("raw_user_external_idx").on(t.userId, t.externalId)],
+  (t) => [
+    uniqueIndex("raw_user_external_idx").on(t.userId, t.externalId),
+    index("raw_user_resv_idx").on(t.userId, t.resvKey),
+  ],
 );
 
 /** Generic key/value cursor store for ingest workers. */

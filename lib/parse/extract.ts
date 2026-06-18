@@ -51,6 +51,12 @@ export interface ParseInput {
   text: string;
   /** Raw HTML body, when available. Used by the heuristic parser; LLM ignores it. */
   html?: string;
+  /**
+   * Lowercased subset of email headers used to detect bulk/marketing mail
+   * (list-unsubscribe, precedence, list-id, feedback-id, x-campaign, etc.).
+   * Used by the heuristic parser; the LLM ignores it.
+   */
+  headers?: Record<string, string>;
 }
 
 /**
