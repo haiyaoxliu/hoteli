@@ -135,6 +135,87 @@ function firstTruthy<K extends keyof ParsedStay>(
   return null;
 }
 
+function stripName(s: string): string {
+  return norm(s).replace(/[^a-z0-9 ]/g, "").trim();
+}
+
+/** Two hotel names refer to the same property (equal, or one contains the other). */
+function nameSimilar(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false;
+  const x = stripName(a);
+  const y = stripName(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return x.length >= 6 && y.length >= 6 && (x.includes(y) || y.includes(x));
+}
+
+type StayRow = typeof stays.$inferSelect;
+
+/**
+ * Find a logged stay that is the same reservation as `merged`: same check-in,
+ * and matching confirmation, a similar hotel name, or the same full date range
+ * (city-guarded). Lets a portal booking and the hotel's own emails collapse.
+ */
+function matchReservationStay(userId: number, merged: ParsedStay): StayRow | null {
+  if (!merged.checkIn) return null;
+  const cands = db
+    .select({ s: stays, pname: properties.name, pcity: properties.city })
+    .from(stays)
+    .leftJoin(properties, eq(properties.id, stays.propertyId))
+    .where(and(eq(stays.userId, userId), eq(stays.checkIn, merged.checkIn)))
+    .all();
+  for (const c of cands) {
+    if (
+      merged.confirmationNo &&
+      c.s.confirmationNo &&
+      c.s.confirmationNo.toUpperCase() === merged.confirmationNo.toUpperCase()
+    ) {
+      return c.s;
+    }
+    if (nameSimilar(merged.hotelName, c.pname)) return c.s;
+    if (
+      merged.checkOut &&
+      c.s.checkOut === merged.checkOut &&
+      (!merged.city || !c.pcity || norm(c.pcity) === norm(merged.city))
+    ) {
+      return c.s;
+    }
+  }
+  return null;
+}
+
+/** Re-link review messages that belong to the same reservation as a new stay. */
+function absorbReviewCopies(userId: number, stayId: number, merged: ParsedStay): void {
+  if (!merged.checkIn) return;
+  const reviews = db
+    .select()
+    .from(rawMessages)
+    .where(and(eq(rawMessages.userId, userId), eq(rawMessages.parseStatus, "review")))
+    .all();
+  for (const r of reviews) {
+    if (!r.parseJson) continue;
+    let p: ParsedStay;
+    try {
+      p = JSON.parse(r.parseJson) as ParsedStay;
+    } catch {
+      continue;
+    }
+    if (p.checkIn !== merged.checkIn) continue;
+    const same =
+      (p.confirmationNo &&
+        merged.confirmationNo &&
+        p.confirmationNo.toUpperCase() === merged.confirmationNo.toUpperCase()) ||
+      nameSimilar(p.hotelName, merged.hotelName) ||
+      (!!p.city && !!merged.city && norm(p.city) === norm(merged.city));
+    if (same) {
+      db.update(rawMessages)
+        .set({ parseStatus: "parsed", stayId })
+        .where(eq(rawMessages.id, r.id))
+        .run();
+    }
+  }
+}
+
 /** Merge all copies of a reservation into the best single record. */
 function mergeParsed(list: ParsedStay[]): ParsedStay {
   // Prefer a copy that has BOTH dates (a real check-in/out pair) over partials.
@@ -188,6 +269,14 @@ async function reconcileByKey(
 
   const merged = mergeParsed(list);
 
+  const linkRows = (stayId: number) => {
+    for (const r of rows) {
+      db.update(rawMessages)
+        .set({ parseStatus: "parsed", stayId })
+        .where(eq(rawMessages.id, r.id))
+        .run();
+    }
+  };
   const markReview = (): IngestOutcome => {
     for (const r of rows) {
       if (r.stayId == null) {
@@ -200,38 +289,24 @@ async function reconcileByKey(
     return "needs_review";
   };
 
-  // Log bar: check-in/out + an identity (name or address). Conf & pin optional.
-  if (!isComplete(merged)) return markReview();
-
-  // Existing stay for this reservation: a copy already linked to one, else the
-  // same property + check-in (dedups across copies that keyed differently).
+  // Find an existing stay this reservation belongs to: a copy already linked,
+  // else a logged stay matching check-in + (confirmation OR similar hotel name OR
+  // same full date range). This unifies records that keyed differently — e.g. an
+  // Amex/portal booking and the hotel's own upsell email for the same stay.
   const linkedId = rows.find((r) => r.stayId != null)?.stayId ?? null;
-  let existingStay =
-    linkedId != null
+  const existingStay =
+    (linkedId != null
       ? db.select().from(stays).where(eq(stays.id, linkedId)).get() ?? null
-      : null;
+      : null) ?? matchReservationStay(userId, merged);
 
-  // Cross-key dedup: an existing stay with the same date range is the same
-  // reservation (copies that keyed by code vs dates still collapse). Guard
-  // against merging two genuinely different hotels on the same dates by
-  // requiring the city to match when both are known.
-  if (!existingStay && merged.checkIn && merged.checkOut) {
-    const sameDates = db
-      .select({ s: stays, city: properties.city })
-      .from(stays)
-      .leftJoin(properties, eq(properties.id, stays.propertyId))
-      .where(
-        and(
-          eq(stays.userId, userId),
-          eq(stays.checkIn, merged.checkIn),
-          eq(stays.checkOut, merged.checkOut),
-        ),
-      )
-      .all();
-    const match = sameDates.find(
-      (c) => !c.city || !merged.city || norm(c.city) === norm(merged.city),
-    );
-    existingStay = match?.s ?? null;
+  // Incomplete (e.g. an upsell with only a check-in): attach to a matching stay
+  // if one exists, otherwise hold for review.
+  if (!isComplete(merged)) {
+    if (existingStay) {
+      linkRows(existingStay.id);
+      return "skipped_existing_stay";
+    }
+    return markReview();
   }
 
   // Find-or-create the property (deduped by name+city); coords best-effort.
@@ -316,12 +391,10 @@ async function reconcileByKey(
     created = true;
   }
 
-  for (const r of rows) {
-    db.update(rawMessages)
-      .set({ parseStatus: "parsed", stayId })
-      .where(eq(rawMessages.id, r.id))
-      .run();
-  }
+  linkRows(stayId);
+  // Pull in any earlier review copies of this same reservation (e.g. upsell
+  // emails that arrived before the booking confirmation).
+  absorbReviewCopies(userId, stayId, merged);
 
   return created ? "created" : "skipped_existing_stay";
 }

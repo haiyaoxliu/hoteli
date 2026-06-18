@@ -7,6 +7,7 @@ const channelColors: Record<string, string> = {
   expedia: "bg-yellow-500/15 text-yellow-300",
   airbnb: "bg-rose-500/15 text-rose-300",
   direct: "bg-emerald-500/15 text-emerald-300",
+  portal: "bg-violet-500/15 text-violet-300",
 };
 
 export function StayCard({ item }: { item: StayWithProperty }) {

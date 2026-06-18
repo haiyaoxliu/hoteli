@@ -74,6 +74,19 @@ const PROFILES: ProfileDef[] = [
   { id: "accor", match: /accor|sofitel|fairmont|raffles|novotel|pullman/i, channel: "direct" },
   { id: "radisson", match: /radisson/i, channel: "direct" },
   { id: "fourseasons", match: /fourseasons|four-seasons/i, channel: "direct" },
+  // Card / travel intermediaries that book hotels on your behalf. The property
+  // is named in the subject/body; treat as a known travel sender ("portal").
+  {
+    id: "amex",
+    match: /amextravel|americanexpress|\bamex[_.]|aexp\.com|fine hotels|@.*\bfhr\b/i,
+    channel: "portal",
+    nameFromSubject: [
+      /(?:reservation|stay|booking) (?:for|at)\s+(.+?)(?:\s+is\b|\s*[-–|·]|$)/i,
+    ],
+  },
+  { id: "chase", match: /chasetravel|chase\.com|ultimate rewards/i, channel: "portal" },
+  { id: "capitalone", match: /capitalone(?:travel)?\.com|capital one travel/i, channel: "portal" },
+  { id: "citi", match: /thankyou\.com|citi(?:travel)?\.com|citi travel/i, channel: "portal" },
 ];
 
 const GENERIC: SenderProfile = {

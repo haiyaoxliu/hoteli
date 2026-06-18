@@ -23,9 +23,11 @@ const StaySchema = z.object({
   total: z.number().nullable().describe("Total amount paid/charged, numeric."),
   currency: z.string().nullable().describe("ISO currency code, e.g. USD, EUR."),
   channel: z
-    .enum(["booking", "expedia", "airbnb", "hotels", "direct", "other"])
+    .enum(["booking", "expedia", "airbnb", "hotels", "direct", "portal", "other"])
     .nullable()
-    .describe("Booking channel."),
+    .describe(
+      "Booking channel. Use 'portal' for card/travel intermediaries (Amex Travel/FHR, Chase Travel, Capital One Travel, Citi).",
+    ),
   confidence: z.number().describe("0..1 confidence in this extraction."),
 });
 
