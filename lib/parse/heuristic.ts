@@ -44,6 +44,11 @@ const UPSELL =
 const DINING =
   /\b(restaurant|dining|prix fixe|tasting menu|table for \d|party of \d|seating|sommelier|reservation for \d+ (?:guests?|people)|our menu)\b/i;
 
+// Account / loyalty / statement / support / legal notifications from hotel and
+// card senders — never a stay, even though the sender is a known travel brand.
+const NONBOOKING =
+  /\b(security code|verification code|one[- ]time pass|passcode|account activity|(?:information|details) (?:has|have) been updated|privacy policy|terms of (?:service|use)|monthly statement|weekly snapshot|\bsnapshot\b|your (?:latest |monthly )?statement|\baward\b|milestone|requalif|explorist|brand explorer|points (?:are ready|have|will expire|expir|balance)|earn(?:ed)?\b.*\bpoints\b|your request|request #|acknowledg|how was your stay|rate your stay|review your stay|leave a review|survey|enquir|inquir)\b/i;
+
 // ---- helpers ----------------------------------------------------------------
 
 function cleanSubject(s = ""): string {
@@ -87,12 +92,14 @@ function validRange(a: string | null, b: string | null): boolean {
 
 const MONTH = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
 const WEEKDAY = "(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\\s*";
+// SEP allows space / dot / hyphen so "07-Mar-2026" and "July 4 2026" both match.
+const SEP = "[\\s.\\-]+";
 const DATE_TOKEN = new RegExp(
   [
-    `(?:${WEEKDAY})?${MONTH}\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s*\\d{4}`,
-    `(?:${WEEKDAY})?\\d{1,2}(?:st|nd|rd|th)?\\s+${MONTH}\\s*,?\\s*\\d{4}`,
+    `(?:${WEEKDAY})?${MONTH}${SEP}\\d{1,2}(?:st|nd|rd|th)?,?${SEP}\\d{4}`,
+    `(?:${WEEKDAY})?\\d{1,2}(?:st|nd|rd|th)?${SEP}${MONTH}${SEP}\\d{4}`,
     `\\d{4}-\\d{2}-\\d{2}`,
-    `\\d{1,2}[/]\\d{1,2}[/]\\d{2,4}`,
+    `\\d{1,2}/\\d{1,2}/\\d{2,4}`,
   ].join("|"),
   "i",
 );
@@ -103,7 +110,8 @@ const DATE_TOKEN_G = new RegExp(DATE_TOKEN.source, "gi");
  * non-US locations) reads "08/06/2026" as 8 June, not 6 August.
  */
 function tokenToIso(token: string, dayFirst: boolean): string | null {
-  const sl = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(token.trim());
+  const t = token.trim();
+  const sl = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(t);
   if (sl) {
     const yy = sl[3].length === 2 ? 2000 + Number(sl[3]) : Number(sl[3]);
     const mo = dayFirst ? Number(sl[2]) : Number(sl[1]);
@@ -113,8 +121,16 @@ function tokenToIso(token: string, dayFirst: boolean): string | null {
     }
     return null;
   }
-  const res = chrono.parse(token);
+  const isoM = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
+  if (isoM) return `${isoM[1]}-${isoM[2]}-${isoM[3]}`;
+  // Month-name forms: normalize hyphen separators ("07-Mar-2026") for chrono.
+  const res = chrono.parse(t.replace(/-/g, " "));
   return res[0] ? isoFromComponent(res[0].start) : null;
+}
+
+/** Collapse runs of layout chars (table dashes/pipes) that push dates away. */
+function deLayout(s: string): string {
+  return s.replace(/[-_=|·•*~]{2,}/g, " ").replace(/\s+/g, " ");
 }
 
 /** First labeled date: scan each label, parse the clean token that follows. */
@@ -122,7 +138,7 @@ function dateNear(text: string, labelSrc: string, dayFirst: boolean): string | n
   const re = new RegExp(labelSrc, "gi");
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 50);
+    const after = deLayout(text.slice(m.index + m[0].length, m.index + m[0].length + 200));
     const dm = DATE_TOKEN.exec(after);
     if (dm) {
       const iso = tokenToIso(dm[0], dayFirst);
@@ -463,10 +479,12 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
   // Body too — used only to avoid wrongly EXCLUDING a real hotel email.
   const strong = strongSubject || STRONG_LODGING.test(head1k);
 
-  // 0) Notifications/messages are never a stay, even when they mention "hotel".
+  // 0) Notifications/messages/loyalty/account mail is never a stay, even from a
+  // known travel brand and even when it mentions "hotel".
   if (/\b(sent you a message|new message|left (?:you )?a review|message from)\b/i.test(subject)) {
     return reject(channel);
   }
+  if (NONBOOKING.test(subject)) return reject(channel);
 
   // 1) Hard-exclude non-lodging confirmations (unless clearly lodging).
   if (!strong && (EXCLUDE_SENDER.test(input.from ?? "") || EXCLUDE_SUBJECT.test(subject))) {
@@ -503,12 +521,23 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
     /\b(reservation|booking|your stay|stay at|itinerary|check[\s-]?in|nights?)\b/i.test(
       subject,
     );
+  // A booking signal is required even from known hotel senders — they also send
+  // plenty of loyalty/account mail. Need a date, a confirmation code, or an
+  // explicit reservation/upcoming-stay cue in the subject.
+  const confNo = extractConfirmation(haystack, channel);
+  const bookingSignal =
+    !!checkIn ||
+    !!confNo ||
+    resHintSubject ||
+    /\bupcoming (?:stay|reservation|trip)\b/i.test(subject);
+  if (!bookingSignal) return reject(channel);
+
   const lodging =
     known || strongSubject || (datePair && !!addr.full && resHintSubject);
   if (!lodging) return reject(channel);
 
   // It's a real lodging candidate — extract the rest.
-  const confirmationNo = extractConfirmation(haystack, channel);
+  const confirmationNo = confNo;
   const hotelName = extractName(subject, profile, input.from, input.html);
   const loc = extractLocation(hotelName, subject, haystack);
   const { total, currency } = extractPrice(haystack);

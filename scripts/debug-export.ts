@@ -115,9 +115,10 @@ async function main() {
       bulk: isBulk(headers, p.from?.text),
       parsed,
       complete: isComplete(parsed),
-      // Excerpts for offline replay (truncated).
-      text: text.replace(/\s+/g, " ").slice(0, 6000),
-      html: html.slice(0, 20000),
+      // Excerpts for offline replay. Targeted pulls keep full content so we can
+      // debug a specific email's dates/fields; the broad scan truncates.
+      text: targeted ? text.replace(/\s+/g, " ") : text.replace(/\s+/g, " ").slice(0, 6000),
+      html: targeted ? html : html.slice(0, 20000),
     });
   }
 
