@@ -4,6 +4,9 @@ A Flighty-style hotel-history tracker. Self-hosted PWA, reached privately over
 Tailscale, with every stay linking to Apple Maps. Acquires past stays by mining
 your local Apple Mail and ingesting forwarded confirmations from a dummy Gmail.
 
+> **👋 New to this / on a fresh Mac?** Read **[SETUP.md](./SETUP.md)** — a
+> complete, no-experience-needed, start-to-finish guide.
+
 ## Stack
 
 - **Next.js 16** (App Router) + React 19 + Tailwind 4, bound to `127.0.0.1`
