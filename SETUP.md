@@ -26,15 +26,55 @@ browser, there's nothing on the Mac for it to find.
 
 ## Step 1 — Install Node.js
 
-Node.js is the engine that runs the app.
+Node.js is the engine that runs the app. Pick **one** of the two options below.
+
+### Option A (recommended) — Homebrew
+
+Homebrew is the standard macOS package manager. This route also installs Apple's
+developer tools, which makes the later steps smoother.
+
+1. Open **Terminal**: press `⌘ Space`, type **Terminal**, hit Return.
+2. Install Homebrew — copy-paste this whole line into Terminal and press Return.
+   It will ask for your Mac password (you won't see it as you type — that's
+   normal) and take a few minutes:
+
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   ```
+
+3. When it finishes, it prints a **"Next steps"** box with two `eval`/`echo`
+   commands. On Apple-silicon Macs (M1/M2/M3/M4), run these so your Terminal can
+   find Homebrew (copy-paste both lines):
+
+   ```bash
+   echo >> ~/.zprofile
+   echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+   eval "$(/opt/homebrew/bin/brew shellenv)"
+   ```
+
+   (On older Intel Macs you can skip step 3.)
+
+4. Install Node:
+
+   ```bash
+   brew install node
+   ```
+
+5. Check it worked — this should print a version number:
+
+   ```bash
+   node --version
+   ```
+
+Homebrew also installs `git`, so if you prefer you can grab the code with
+`git clone` in Step 2.
+
+### Option B — Direct download (no Terminal)
 
 1. Go to **https://nodejs.org**.
-2. Click the big button that says **"LTS"** (recommended). It downloads a file
-   ending in `.pkg`.
+2. Click the big **"LTS"** button. It downloads a file ending in `.pkg`.
 3. Open the downloaded file and click through the installer (Continue → Agree →
    Install). Enter your Mac password if asked.
-
-That's it — no settings to change.
 
 ---
 
@@ -157,7 +197,8 @@ You can also add a stay by hand with the **+ Add** button.
 
 | Problem | Fix |
 |---|---|
-| `npm: command not found` | Node didn't install or Terminal was open before installing. Quit Terminal (`⌘ Q`), reopen, try again. Re-run Step 1 if needed. |
+| `npm: command not found` | Quit Terminal (`⌘ Q`) and reopen so it picks up the new install. If you used Homebrew, make sure you ran the `eval "$(/opt/homebrew/bin/brew shellenv)"` line from Step 1.3. |
+| `brew: command not found` | The Step 1.3 PATH lines didn't run. Re-paste them, or quit and reopen Terminal. |
 | Errors building **better-sqlite3** during setup | Run `xcode-select --install`, finish it, then `npm run setup` again. |
 | Backfill finds **nothing** | Make sure your email is added to the **Mail** app and has finished syncing (the "Before you start" section), and that **Terminal** has **Full Disk Access** (Step 5) — then quit/reopen Terminal and retry. |
 | "Port 3000 in use" | Something else is using it. Close other copies of the app, or restart your Mac. |
