@@ -1,36 +1,165 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🏨 Hoteli
 
-## Getting Started
+A Flighty-style hotel-history tracker. Self-hosted PWA, reached privately over
+Tailscale, with every stay linking to Apple Maps. Acquires past stays by mining
+your local Apple Mail and ingesting forwarded confirmations from a dummy Gmail.
 
-First, run the development server:
+## Stack
+
+- **Next.js 16** (App Router) + React 19 + Tailwind 4, bound to `127.0.0.1`
+- **SQLite** via Drizzle ORM (`hoteli.db`)
+- **Auth**: Tailscale Serve identity header (`Tailscale-User-Login`) — no login screen
+- **Geo**: pluggable provider — OSM Nominatim now, Apple Maps Server API later
+- **Maps**: MapLibre (free tiles) in-app; deep links open Apple Maps
+- **Parser**: deterministic rules first (free/offline), optional Claude fallback
+- **Ingestion**: local Apple Mail `.emlx` miner + Gmail API poller, deduped via `raw_messages`
+- **Review queue**: confirmations the rules can't fully extract land in `/review` for one-click add
+- **PWA**: Serwist (installable, offline cache)
+
+## Quick start (private, local, no config)
+
+No API keys, no `.env`, no Tailscale needed. Your email is read locally and
+never sent anywhere.
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run setup    # npm install + create the local SQLite DB
+npm run dev      # open http://127.0.0.1:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then **Settings → Backfill from Apple Mail** (grant the terminal Full Disk
+Access first: System Settings → Privacy & Security → Full Disk Access), or run
+`npm run backfill -- you@example.com`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### What does / doesn't leave your machine
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+With **no `ANTHROPIC_API_KEY`** (the default), the app prints its posture at
+startup. In that mode:
 
-## Learn More
+| Data | Leaves machine? |
+|---|---|
+| Your email (subjects, bodies, confirmation codes, dates) | **No — never.** Parsed 100% on-device. |
+| Email files / mailbox | **No.** Read-only, locally. |
+| Hotel name + city | Sent to OpenStreetMap **only** to fetch a map pin's coordinates. |
+| Map tiles | Fetched from the map provider by coordinate (for the map view). |
+| Anthropic / Gmail / any cloud | **No.** LLM is only ever called if you set an API key; Gmail poller is off unless configured. |
 
-To learn more about Next.js, take a look at the following resources:
+To go further: set `LOCAL_ONLY=1` to hard-disable the LLM even if a key is
+present, and/or `GEO_PROVIDER=…` to change/stop geocoding (the map needs it).
+Telemetry is disabled. Fonts (Geist) are self-hosted by Next at build time, so
+there's no runtime font fetch.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Sending this to someone else
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Your hotel data lives in `hoteli.db` — **delete it before sharing** so you don't
+send your own stays. `.env` (if you made one) and `node_modules` should also be
+excluded. Cleanest:
 
-## Deploy on Vercel
+```bash
+rm -f hoteli.db hoteli.db-* .env
+# zip the folder without node_modules, or send via `git archive`
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+They then run `npm run setup && npm run dev` and get a fresh, empty database.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Full setup (with optional extras)
+
+```bash
+npm install
+cp .env.example .env        # optional — only for LLM fallback / Gmail / Tailscale
+npm run db:push             # create the SQLite schema
+npm run build && npm start  # serves on 127.0.0.1:3000
+```
+
+Identity resolution: Tailscale `Tailscale-User-Login` header → `DEV_USER` env →
+built-in `local@hoteli.app` (so it just works locally). Over `tailscale serve`
+each tailnet user becomes a distinct account.
+
+> ⚠️ **Always bind to `127.0.0.1`** (the scripts do). The app trusts the
+> `Tailscale-User-Login` header, which is only safe because `tailscale serve` is
+> the sole path in. Never expose it on `0.0.0.0`/the LAN.
+
+## Expose over Tailscale
+
+```bash
+tailscale serve --bg https / proxy 3000
+# → https://<machine>.<tailnet>.ts.net  (tailnet-only; identity headers injected)
+```
+
+Each tailnet user who opens the URL becomes a distinct Hoteli user automatically.
+
+## Acquiring past data
+
+### 1. Local Apple Mail backfill (primary, no auth)
+
+Mines `~/Library/Mail` on this Mac for past confirmations. Grant the
+terminal/runtime **Full Disk Access** (System Settings → Privacy & Security).
+
+```bash
+ANTHROPIC_API_KEY=… npm run backfill -- you@example.com 2000
+```
+
+Re-running is safe — seen messages are skipped (idempotent via Message-ID).
+Also available from **Settings → Import history → Backfill from Apple Mail**
+(bounded run for the interactive button).
+
+### 2. Forwarded email (ongoing, multi-user)
+
+Each user has a forwarding alias shown in **Settings**
+(`hoteli.inbox+<tag>@gmail.com`). Forward confirmations there (or set a Gmail
+auto-forward filter). The poller routes each message to the right user by the
+`+tag` and runs every 15 min (configurable via `GMAIL_POLL_CRON`).
+
+**One-time Gmail setup:** create a Google Cloud OAuth *Desktop* client, enable
+the Gmail API, obtain a refresh token (read-only scope `gmail.readonly`), and set
+`GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` /
+`GMAIL_ADDRESS` in `.env`.
+
+### 3. Financial statements (future)
+
+Phase 5: CSV/OFX import to flag lodging charges and fill gaps. Not yet built.
+
+## Parsing modes
+
+Set `PARSER` in `.env`:
+- `auto` (default) — deterministic rules first; only emails the rules can't
+  finish (and only if `ANTHROPIC_API_KEY` is set) escalate to the LLM.
+- `heuristic` — rules only, fully free/offline (no API key needed).
+- `llm` — LLM only.
+
+The deterministic parser (`lib/parse/heuristic.ts`) gates marketing out, then
+extracts hotel name / dates (via `chrono-node`) / confirmation code per sender
+(`cheerio` over the HTML). Coverage is partial by design — anything it can't
+fully extract but believes is a real lodging confirmation goes to the **review
+queue** at `/review` (badge in the nav), where you confirm/edit and add in one
+click, or dismiss. Marketing and non-lodging confirmations (flights, orders,
+event/university confirmations) are rejected.
+
+Measure coverage on your own mailbox without writing anything:
+
+```bash
+npm run parse-eval -- --show
+```
+
+
+## Switching to Apple Maps data
+
+Once you have an Apple Developer membership, create a Maps key and set
+`GEO_PROVIDER=applemaps` + `APPLE_MAPS_TEAM_ID/KEY_ID/PRIVATE_KEY`, then
+implement the token exchange in `lib/geo/applemaps.ts`. Callers don't change.
+
+## Run as a service (Mac mini)
+
+See `deploy/com.hoteli.app.plist` — copy to `~/Library/LaunchAgents/`, edit the
+paths/env, then `launchctl load`. Re-run `tailscale serve` on the mini.
+
+## Layout
+
+```
+app/                 routes (timeline, map, stats, settings, stay detail) + API
+components/           StayCard, StayForm, MapView, Sync/Delete controls
+lib/db/              Drizzle schema + client
+lib/geo/             provider interface, nominatim, applemaps, Apple Maps links
+lib/parse/           Claude structured extraction
+lib/ingest/          emlx miner, gmail poller, pipeline, cron, alias
+scripts/backfill.ts  CLI historical backfill
+```

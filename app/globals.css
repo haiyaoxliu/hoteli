@@ -1,26 +1,48 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0b0d12;
+  --surface: #151922;
+  --surface-2: #1d222d;
+  --border: #2a313e;
+  --foreground: #eef1f6;
+  --muted: #97a0b0;
+  --accent: #5b8cff;
+  --accent-warm: #ff9f43;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-warm: var(--accent-warm);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system,
+    sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+}
+
+* {
+  border-color: var(--border);
+}
+
+/* MapLibre overrides to fit the dark theme */
+.maplibregl-popup-content {
+  background: var(--surface-2);
+  color: var(--foreground);
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+}
+.maplibregl-popup-tip {
+  border-top-color: var(--surface-2);
 }

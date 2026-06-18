@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hoteli launchd service for a Mac mini.
+
+  1. Edit the paths and env below (absolute paths required).
+  2. Grant the runtime Full Disk Access so the .emlx miner can read ~/Library/Mail.
+  3. cp deploy/com.hoteli.app.plist ~/Library/LaunchAgents/
+  4. launchctl load ~/Library/LaunchAgents/com.hoteli.app.plist
+  5. tailscale serve --bg https / proxy 3000
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hoteli.app</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/npm</string>
+        <string>start</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/github/hoteli</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <key>NODE_ENV</key>
+        <string>production</string>
+        <key>HOTELI_DB</key>
+        <string>/Users/YOU/github/hoteli/hoteli.db</string>
+        <key>ANTHROPIC_API_KEY</key>
+        <string>sk-ant-...</string>
+        <key>GEO_PROVIDER</key>
+        <string>nominatim</string>
+        <key>HOTELI_CONTACT</key>
+        <string>you@example.com</string>
+        <!-- Gmail (optional) -->
+        <key>GMAIL_ADDRESS</key>
+        <string>hoteli.inbox@gmail.com</string>
+        <key>GMAIL_CLIENT_ID</key>
+        <string></string>
+        <key>GMAIL_CLIENT_SECRET</key>
+        <string></string>
+        <key>GMAIL_REFRESH_TOKEN</key>
+        <string></string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/Library/Logs/hoteli.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/Library/Logs/hoteli.err.log</string>
+</dict>
+</plist>
