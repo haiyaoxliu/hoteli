@@ -33,7 +33,7 @@ const STRONG_LODGING =
 const EXCLUDE_SENDER =
   /(united|delta|aa\.com|americanair|southwest|jetblue|alaskaair|spirit|frontier|ryanair|easyjet|lufthansa|aircanada|airlines?)\b/i;
 const EXCLUDE_SUBJECT =
-  /\b(flights?|airlines?|boarding pass|e-?ticket|order\s*#|your order|order confirmation|invoice|university|college|campus|admission|accepted student|open house|webinar|seminar|\bsat\b|\bact\b|exam|tour reservation|registration confirmation|one[- ]time pass|passcode|verification code|expense reimbursement|rewards? points?)\b/i;
+  /\b(flights?|airlines?|boarding pass|e-?ticket|order\s*#|your order|order confirmation|invoice|university|college|campus|admission|accepted student|open house|webinar|seminar|\bsat\b|\bact\b|exam|tour reservation|registration confirmation|one[- ]time pass|passcode|verification code|expense reimbursement|rewards? points?|sent you a message|new message|left (?:you )?a review)\b/i;
 
 // Upsell / loyalty marketing dressed up as a "stay" email (e.g. Langham
 // "Reminder to upgrade your stay", "Elevate your stay").
@@ -305,11 +305,18 @@ function cleanName(n: string | null | undefined): string | null {
 function extractName(
   subject: string,
   profile: SenderProfile,
+  from = "",
   html?: string,
 ): string | null {
   // Provider-specific subject templates first, then generic patterns.
   for (const re of [...profile.nameFromSubject, ...NAME_SUBJECT_PATTERNS]) {
     const n = cleanName(re.exec(subject)?.[1]);
+    if (n) return n;
+  }
+  // Sender display name — chains often send as "The Langham, Hong Kong" <…>.
+  const disp = (from.match(/^\s*"?([^"<]+?)"?\s*</)?.[1] ?? "").trim();
+  if (disp && (findCityCountry(disp) || STRONG_LODGING.test(disp))) {
+    const n = cleanName(disp);
     if (n) return n;
   }
   if (html) {
@@ -396,15 +403,22 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
   const bulk = isBulk(input.headers, input.from);
   const strong = STRONG_LODGING.test(subject) || STRONG_LODGING.test(head1k);
 
+  // 0) Notifications/messages are never a stay, even when they mention "hotel".
+  if (/\b(sent you a message|new message|left (?:you )?a review|message from)\b/i.test(subject)) {
+    return reject(channel);
+  }
+
   // 1) Hard-exclude non-lodging confirmations (unless clearly lodging).
   if (!strong && (EXCLUDE_SENDER.test(input.from ?? "") || EXCLUDE_SUBJECT.test(subject))) {
     return reject(channel);
   }
-  // Upsell/loyalty marketing dressed as a stay, and restaurant/dining bookings.
-  if (UPSELL.test(subject)) return reject(channel);
-  if (DINING.test(subject) || DINING.test(head1k)) {
-    if (!strong) return reject(channel); // a real hotel may mention "restaurant"
-  }
+  // Restaurant/dining bookings → reject (unless clearly a hotel).
+  if ((DINING.test(subject) || DINING.test(head1k)) && !strong) return reject(channel);
+  // Upsell/loyalty mail: from an unknown sender it's marketing → reject. From a
+  // known hotel/chain it implies a real booking, so keep it — but it's routed to
+  // review (we don't trust its dates as a full stay; see `upsell` below).
+  const upsell = UPSELL.test(subject) || UPSELL.test(head1k);
+  if (upsell && !known) return reject(channel);
 
   // 2) Bulk/marketing → reject. Real reservation confirmations are
   // transactional and don't carry List-Unsubscribe / ESP campaign headers.
@@ -429,9 +443,12 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
 
   // It's a real lodging candidate — extract the rest.
   const confirmationNo = extractConfirmation(haystack, channel);
-  const hotelName = extractName(subject, profile, input.html);
+  const hotelName = extractName(subject, profile, input.from, input.html);
   const loc = extractLocation(hotelName, subject, haystack);
   const { total, currency } = extractPrice(haystack);
+  // Upsells imply a real booking but their dates aren't a reliable full stay —
+  // drop the checkout so they're routed to review for confirmation.
+  const outDate = upsell ? null : checkOut;
 
   let confidence = 0.35;
   if (hotelName) confidence += 0.2;
@@ -450,7 +467,7 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
     city: loc.city,
     country: loc.country,
     checkIn,
-    checkOut,
+    checkOut: outDate,
     confirmationNo,
     roomType: null,
     total,
