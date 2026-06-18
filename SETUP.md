@@ -204,6 +204,7 @@ You can also add a stay by hand with the **+ Add** button.
 | Backfill works but **misses older hotels** (Gmail) | Apple Mail may only be syncing your **Inbox**. In **Mail → Settings → Accounts → your Gmail → Mailbox Behaviors**, and in Gmail's web settings (Labels → show "All Mail" in IMAP), make sure **All Mail** is available, then let Mail finish downloading and run backfill again. |
 | "Port 3000 in use" | Something else is using it. Close other copies of the app, or restart your Mac. |
 | Page won't load | Make sure the Terminal still shows the app running and you used `http://localhost:3000`. |
+| `no such table: users` (or similar) | Update to the latest version (`git pull` or re-download) and restart `npm run dev` — the database now creates itself automatically on startup. |
 
 ---
 
