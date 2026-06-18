@@ -33,8 +33,16 @@ async function main() {
 
   const fmt = (ms: number | null) =>
     ms ? new Date(ms).toISOString().slice(0, 10) : "—";
-  console.log("\nDone:", summary);
-  console.log(`Range looked back: ${fmt(summary.oldest)} → ${fmt(summary.newest)}`);
+  console.log(
+    `\nScanned ${summary.filesSeen} emails (${fmt(summary.oldest)} → ${fmt(
+      summary.newest,
+    )}) · logged ${summary.created} · review ${summary.review} · not-a-confirmation ${summary.noMatch}`,
+  );
+  if (summary.mailboxes.length) {
+    console.log("Mailboxes scanned:");
+    for (const m of summary.mailboxes) console.log(`  • ${m.name}: ${m.count}`);
+  }
+  if (summary.note) console.log(`\nNote: ${summary.note}`);
   process.exit(0);
 }
 

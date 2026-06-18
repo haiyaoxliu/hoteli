@@ -347,9 +347,17 @@ export interface IngestSummary {
   noMatch: number;
   failed: number;
   duplicate: number;
+  /** Total mail messages (.emlx files) the miner saw, before filtering. */
+  filesSeen: number;
+  /** Per-mailbox message counts, so the user can see what got scanned. */
+  mailboxes: { name: string; count: number }[];
   /** Epoch ms of the oldest / newest email the parser looked at (its range). */
   oldest: number | null;
   newest: number | null;
+  /** Human-readable explanation of the result (esp. on zero results). */
+  note: string | null;
+  /** Set when the run couldn't read the mail store (Full Disk Access). */
+  permissionDenied: boolean;
 }
 
 export function emptySummary(): IngestSummary {
@@ -361,8 +369,12 @@ export function emptySummary(): IngestSummary {
     noMatch: 0,
     failed: 0,
     duplicate: 0,
+    filesSeen: 0,
+    mailboxes: [],
     oldest: null,
     newest: null,
+    note: null,
+    permissionDenied: false,
   };
 }
 

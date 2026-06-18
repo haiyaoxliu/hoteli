@@ -10,9 +10,15 @@ export const maxDuration = 300;
 
 const bodySchema = z.object({
   source: z.enum(["emlx", "gmail"]),
-  // Optional cost guard for the interactive button; the CLI can go higher.
-  maxCandidates: z.number().int().positive().max(2000).optional(),
+  maxCandidates: z.number().int().positive().max(100_000).optional(),
 });
+
+// On-device parsing is free, so scan everything. With an LLM key, cap the
+// interactive run (each candidate is an API call) — the CLI can go higher.
+function defaultCap(): number {
+  const llm = process.env.LOCAL_ONLY !== "1" && !!process.env.ANTHROPIC_API_KEY;
+  return llm ? 200 : 100_000;
+}
 
 export async function POST(req: Request) {
   const user = await getCurrentUser();
@@ -20,21 +26,14 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "bad request" }, { status: 400 });
   }
+  const cap = parsed.data.maxCandidates ?? defaultCap();
 
   try {
     if (parsed.data.source === "emlx") {
-      const s = await backfillFromAppleMail(user.id, {
-        maxCandidates: parsed.data.maxCandidates ?? 50,
-      });
-      return NextResponse.json(s);
-    } else {
-      const s = await syncGmail(parsed.data.maxCandidates ?? 50);
-      return NextResponse.json(s);
+      return NextResponse.json(await backfillFromAppleMail(user.id, { maxCandidates: cap }));
     }
+    return NextResponse.json(await syncGmail(cap));
   } catch (err) {
-    return NextResponse.json(
-      { error: (err as Error).message },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
 }

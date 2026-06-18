@@ -35,27 +35,42 @@ function dateFromHead(head: string): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
-function* walkEmlx(root: string): Generator<string> {
+interface WalkState {
+  permissionDenied: boolean;
+}
+
+function* walkEmlx(root: string, state: WalkState): Generator<string> {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return; // unreadable dir (permissions) — skip
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EACCES") state.permissionDenied = true;
+    return; // unreadable dir — skip
   }
   for (const e of entries) {
     const full = path.join(root, e.name);
     if (e.isDirectory()) {
-      yield* walkEmlx(full);
+      yield* walkEmlx(full, state);
     } else if (e.isFile() && e.name.endsWith(".emlx")) {
       yield full;
     }
   }
 }
 
+/** Derive a readable mailbox label from a .emlx path, e.g. "[Gmail]/All Mail". */
+function mailboxLabel(file: string): string {
+  const parts = file.split(path.sep);
+  const boxes = parts
+    .filter((p) => p.endsWith(".mbox"))
+    .map((p) => p.slice(0, -".mbox".length));
+  return boxes.length ? boxes.join("/") : "(unknown)";
+}
+
 export interface EmlxOptions {
   /** Mail root(s); defaults to ~/Library/Mail. */
   roots?: string[];
-  /** Max candidate messages to LLM-parse (cost guard). */
+  /** Max candidate messages to fully parse (cost guard for LLM mode). */
   maxCandidates?: number;
   onProgress?: (s: IngestSummary) => void;
 }
@@ -73,16 +88,35 @@ export async function backfillFromAppleMail(
   opts: EmlxOptions = {},
 ): Promise<IngestSummary> {
   const roots = opts.roots ?? [path.join(os.homedir(), "Library", "Mail")];
-  const max = opts.maxCandidates ?? 500;
+  const max = opts.maxCandidates ?? 5000;
   const summary = emptySummary();
+  const state: WalkState = { permissionDenied: false };
+  const boxCounts = new Map<string, number>();
   let candidates = 0;
+  let anyRootExists = false;
 
   for (const root of roots) {
-    for (const file of walkEmlx(root)) {
+    // Distinguish "Mail not set up" (ENOENT) from "no Full Disk Access" (EPERM)
+    // at the top level, before walking.
+    try {
+      fs.readdirSync(root);
+      anyRootExists = true;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EACCES") state.permissionDenied = true;
+      continue;
+    }
+
+    for (const file of walkEmlx(root, state)) {
+      summary.filesSeen++;
+      boxCounts.set(mailboxLabel(file), (boxCounts.get(mailboxLabel(file)) ?? 0) + 1);
+
       let raw: Buffer;
       try {
         raw = fs.readFileSync(file);
-      } catch {
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === "EPERM" || code === "EACCES") state.permissionDenied = true;
         continue;
       }
       const msg = emlxToRfc822(raw);
@@ -93,10 +127,10 @@ export async function backfillFromAppleMail(
       // mailbox window the parser looked at (even messages we don't ingest).
       noteDate(summary, dateFromHead(head));
 
-      // Cheap pre-filter on the raw header/body text before full parse + LLM.
+      // Cheap pre-filter on the raw header/body text before full parse.
       if (!KEYWORDS.test(head)) continue;
-      // Past the candidate cap: keep scanning for the date range, skip the
-      // expensive parse + LLM.
+      // Past the candidate cap: keep scanning for the range, skip the expensive
+      // parse (only relevant in LLM mode; heuristic mode uses a very high cap).
       if (candidates >= max) continue;
 
       let parsed;
@@ -125,6 +159,33 @@ export async function backfillFromAppleMail(
       opts.onProgress?.(summary);
     }
   }
+
   recountReview(summary, userId); // reflect reservations merged out of review
+  summary.permissionDenied = state.permissionDenied;
+  summary.mailboxes = [...boxCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+
+  // Explain the outcome — especially zero results.
+  if (state.permissionDenied && summary.filesSeen === 0) {
+    summary.note =
+      "Couldn't read your Mail folder. Grant Full Disk Access to your terminal " +
+      "(System Settings → Privacy & Security → Full Disk Access), then fully quit " +
+      "and reopen it and run this again.";
+  } else if (!anyRootExists) {
+    summary.note =
+      "No Mail app data found (~/Library/Mail). Add your email account to the " +
+      "macOS Mail app and let it finish downloading, then try again.";
+  } else if (summary.filesSeen === 0) {
+    summary.note =
+      "No messages found in the Mail app yet. If you just added your account, " +
+      "open Mail and let it finish downloading your email (for Gmail, make sure " +
+      "'All Mail' is syncing), then try again.";
+  } else if (summary.scanned === 0) {
+    summary.note = `Scanned ${summary.filesSeen} emails but found no hotel confirmations.`;
+  } else if (summary.created === 0 && summary.review > 0) {
+    summary.note = `Found ${summary.review} possible stay(s) that need review.`;
+  }
+
   return summary;
 }

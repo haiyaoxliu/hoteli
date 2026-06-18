@@ -5,14 +5,39 @@ import { useState } from "react";
 
 type Kind = "emlx" | "gmail";
 
+interface SyncResult {
+  scanned: number;
+  created: number;
+  review: number;
+  noMatch: number;
+  filesSeen: number;
+  mailboxes: { name: string; count: number }[];
+  oldest: number | null;
+  newest: number | null;
+  note: string | null;
+  permissionDenied: boolean;
+}
+
+function fmt(ms?: number | null): string | null {
+  return ms
+    ? new Date(ms).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
+    : null;
+}
+
 export function SyncControls() {
   const router = useRouter();
   const [status, setStatus] = useState<string | null>(null);
+  const [result, setResult] = useState<SyncResult | null>(null);
   const [busy, setBusy] = useState<Kind | null>(null);
 
   async function run(kind: Kind) {
     setBusy(kind);
-    setStatus(`Running ${kind} import…`);
+    setStatus(kind === "emlx" ? "Scanning your Mail…" : "Syncing forwarded email…");
+    setResult(null);
     try {
       const res = await fetch("/api/sync", {
         method: "POST",
@@ -24,17 +49,8 @@ export function SyncControls() {
         setStatus(`Error: ${data.error ?? res.status}`);
         return;
       }
-      const fmt = (ms?: number | null) =>
-        ms ? new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null;
-      const range =
-        data.oldest && data.newest
-          ? ` Looked back over emails from ${fmt(data.oldest)} to ${fmt(data.newest)}.`
-          : "";
-      setStatus(
-        `Done: scanned ${data.scanned ?? 0}, new ${data.created ?? 0}, ` +
-          `needs review ${data.review ?? 0}, not a confirmation ${data.noMatch ?? 0}.` +
-          range,
-      );
+      setStatus(null);
+      setResult(data as SyncResult);
       router.refresh();
     } catch (e) {
       setStatus(`Error: ${(e as Error).message}`);
@@ -42,6 +58,12 @@ export function SyncControls() {
       setBusy(null);
     }
   }
+
+  const range =
+    result?.oldest && result?.newest
+      ? `${fmt(result.oldest)} → ${fmt(result.newest)}`
+      : null;
+  const problem = !!result && (result.permissionDenied || result.filesSeen === 0);
 
   return (
     <div className="space-y-3">
@@ -61,7 +83,48 @@ export function SyncControls() {
           {busy === "gmail" ? "Syncing…" : "Sync forwarded email"}
         </button>
       </div>
+
       {status && <p className="text-sm text-muted">{status}</p>}
+
+      {result && (
+        <div className="space-y-2 text-sm">
+          <p>
+            Scanned <b>{result.filesSeen.toLocaleString()}</b> emails
+            {range ? ` (${range})` : ""} — logged <b>{result.created}</b>, to
+            review <b>{result.review}</b>.
+          </p>
+
+          {result.note && (
+            <p
+              className={`rounded-lg border px-3 py-2 ${
+                problem
+                  ? "border-accent-warm/40 bg-accent-warm/10 text-accent-warm"
+                  : "border-border bg-surface-2 text-muted"
+              }`}
+            >
+              {result.note}
+            </p>
+          )}
+
+          {result.mailboxes.length > 0 && (
+            <details className="rounded-lg border border-border bg-surface-2 px-3 py-2">
+              <summary className="cursor-pointer text-muted">
+                Mailboxes scanned ({result.mailboxes.length})
+              </summary>
+              <ul className="mt-2 space-y-1">
+                {result.mailboxes.map((m) => (
+                  <li key={m.name} className="flex justify-between gap-4">
+                    <span className="truncate">{m.name}</span>
+                    <span className="shrink-0 text-muted">
+                      {m.count.toLocaleString()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
     </div>
   );
 }

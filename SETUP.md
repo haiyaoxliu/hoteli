@@ -200,7 +200,8 @@ You can also add a stay by hand with the **+ Add** button.
 | `npm: command not found` | Quit Terminal (`⌘ Q`) and reopen so it picks up the new install. If you used Homebrew, make sure you ran the `eval "$(/opt/homebrew/bin/brew shellenv)"` line from Step 1.3. |
 | `brew: command not found` | The Step 1.3 PATH lines didn't run. Re-paste them, or quit and reopen Terminal. |
 | Errors building **better-sqlite3** during setup | Run `xcode-select --install`, finish it, then `npm run setup` again. |
-| Backfill finds **nothing** | Make sure your email is added to the **Mail** app and has finished syncing (the "Before you start" section), and that **Terminal** has **Full Disk Access** (Step 5) — then quit/reopen Terminal and retry. |
+| Backfill finds **nothing** | The app now tells you why right under the button. The two usual causes: (1) **Mail is still downloading** — open Mail, wait until it's done (see Gmail note below), then retry; (2) **Full Disk Access** isn't granted to Terminal (Step 5) — grant it, then fully quit/reopen Terminal and retry. The "Mailboxes scanned" list shows which inboxes it could read. |
+| Backfill works but **misses older hotels** (Gmail) | Apple Mail may only be syncing your **Inbox**. In **Mail → Settings → Accounts → your Gmail → Mailbox Behaviors**, and in Gmail's web settings (Labels → show "All Mail" in IMAP), make sure **All Mail** is available, then let Mail finish downloading and run backfill again. |
 | "Port 3000 in use" | Something else is using it. Close other copies of the app, or restart your Mac. |
 | Page won't load | Make sure the Terminal still shows the app running and you used `http://localhost:3000`. |
 
