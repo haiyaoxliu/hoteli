@@ -50,3 +50,6 @@ hoteli.db-wal
 # generated service worker (Serwist build output)
 public/sw.js
 public/swe-worker-*.js
+
+# debug exports contain real email content — never commit
+hoteli-debug*.json

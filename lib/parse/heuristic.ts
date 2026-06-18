@@ -1,8 +1,9 @@
 import * as chrono from "chrono-node";
 import * as cheerio from "cheerio";
 import type { ParsedStay, ParseInput } from "./extract";
-import { senderProfile } from "./senders";
+import { getProfile, type SenderProfile } from "./senders";
 import { isBulk } from "./headers";
+import { findCityCountry, findCountry } from "./gazetteer";
 
 /**
  * Deterministic (non-LLM) extraction of a hotel stay from a confirmation email.
@@ -32,7 +33,16 @@ const STRONG_LODGING =
 const EXCLUDE_SENDER =
   /(united|delta|aa\.com|americanair|southwest|jetblue|alaskaair|spirit|frontier|ryanair|easyjet|lufthansa|aircanada|airlines?)\b/i;
 const EXCLUDE_SUBJECT =
-  /\b(flights?|airlines?|boarding pass|e-?ticket|order\s*#|your order|order confirmation|invoice|university|college|campus|admission|accepted student|open house|webinar|seminar|\bsat\b|\bact\b|exam|tour reservation|registration confirmation)\b/i;
+  /\b(flights?|airlines?|boarding pass|e-?ticket|order\s*#|your order|order confirmation|invoice|university|college|campus|admission|accepted student|open house|webinar|seminar|\bsat\b|\bact\b|exam|tour reservation|registration confirmation|one[- ]time pass|passcode|verification code|expense reimbursement|rewards? points?)\b/i;
+
+// Upsell / loyalty marketing dressed up as a "stay" email (e.g. Langham
+// "Reminder to upgrade your stay", "Elevate your stay").
+const UPSELL =
+  /\b(upgrade your (?:stay|room)|elevat(?:e|ing) your (?:stay|delightful)|enhance your stay|complete your stay|upgrade your delightful)\b/i;
+
+// Restaurant / dining reservations (e.g. a NYC restaurant "Re: Reservation").
+const DINING =
+  /\b(restaurant|dining|prix fixe|tasting menu|table for \d|party of \d|seating|sommelier|reservation for \d+ (?:guests?|people)|our menu)\b/i;
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -278,18 +288,27 @@ const NAME_SUBJECT_PATTERNS: RegExp[] = [
 ];
 
 const JUNK_NAME =
-  /^(your|the|a)\b|pack your bags|get ready|here are|stories|welcome|thank you|order\b|registration|payment|trip planning|reservation reminder|you're going/i;
+  /^(your|the|a)\s+(reservation|booking|stay|trip|hotel|order|upcoming)\b|pack your bags|get ready|here are|stories|welcome to|thank you|^order\b|registration|payment|trip planning|reservation reminder|you're going|upgrade|elevate/i;
 
 function cleanName(n: string | null | undefined): string | null {
   if (!n) return null;
-  const t = n.replace(/\s+/g, " ").trim().replace(/[,–-]+$/, "").trim();
+  const t = n
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.,;:–-]+$/, "")
+    .trim();
   if (t.length < 3 || t.length > 120) return null;
   if (JUNK_NAME.test(t)) return null;
   return t;
 }
 
-function extractName(subject: string, html?: string): string | null {
-  for (const re of NAME_SUBJECT_PATTERNS) {
+function extractName(
+  subject: string,
+  profile: SenderProfile,
+  html?: string,
+): string | null {
+  // Provider-specific subject templates first, then generic patterns.
+  for (const re of [...profile.nameFromSubject, ...NAME_SUBJECT_PATTERNS]) {
     const n = cleanName(re.exec(subject)?.[1]);
     if (n) return n;
   }
@@ -305,6 +324,31 @@ function extractName(subject: string, html?: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Resolve location for geocoding. Prefer a parsed US street address; otherwise
+ * pull a known city (+country) from the name/subject/body — for branded hotels
+ * the city is usually in the name ("Park Hyatt Guangzhou", "Cordis, Hong Kong").
+ */
+function extractLocation(
+  name: string | null,
+  subject: string,
+  haystack: string,
+): { address: string | null; city: string | null; country: string | null } {
+  const addr = extractAddress(haystack);
+  if (addr.full) return { address: addr.full, city: addr.city, country: addr.country };
+
+  // The hotel name / subject is the strongest signal for branded hotels.
+  const hint = `${name ?? ""} ; ${subject}`;
+  const gz = findCityCountry(hint) ?? findCityCountry(haystack.slice(0, 3000));
+  if (gz) return { address: null, city: gz.city, country: gz.country };
+
+  // "Name, City" pattern in the subject (e.g. "Welcoming you to Cordis, Hong Kong").
+  const m = /,\s*([A-Z][A-Za-z .'\-]{2,30})\s*$/.exec(subject);
+  if (m) return { address: null, city: m[1].trim(), country: findCountry(haystack) };
+
+  return { address: null, city: null, country: findCountry(haystack) };
 }
 
 // ---- price ------------------------------------------------------------------
@@ -347,13 +391,19 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
   const haystack = `${subject}\n${bodyText}`;
   const head1k = bodyText.slice(0, 1000);
 
-  const { channel, known } = senderProfile(input.from);
+  const profile = getProfile(input.from);
+  const { channel, known } = profile;
   const bulk = isBulk(input.headers, input.from);
   const strong = STRONG_LODGING.test(subject) || STRONG_LODGING.test(head1k);
 
   // 1) Hard-exclude non-lodging confirmations (unless clearly lodging).
   if (!strong && (EXCLUDE_SENDER.test(input.from ?? "") || EXCLUDE_SUBJECT.test(subject))) {
     return reject(channel);
+  }
+  // Upsell/loyalty marketing dressed as a stay, and restaurant/dining bookings.
+  if (UPSELL.test(subject)) return reject(channel);
+  if (DINING.test(subject) || DINING.test(head1k)) {
+    if (!strong) return reject(channel); // a real hotel may mention "restaurant"
   }
 
   // 2) Bulk/marketing → reject. Real reservation confirmations are
@@ -379,14 +429,16 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
 
   // It's a real lodging candidate — extract the rest.
   const confirmationNo = extractConfirmation(haystack, channel);
-  const hotelName = extractName(subject, input.html);
+  const hotelName = extractName(subject, profile, input.html);
+  const loc = extractLocation(hotelName, subject, haystack);
   const { total, currency } = extractPrice(haystack);
 
   let confidence = 0.35;
   if (hotelName) confidence += 0.2;
   if (datePair) confidence += 0.25;
   else if (checkIn) confidence += 0.1;
-  if (addr.full) confidence += 0.15;
+  if (loc.address) confidence += 0.15;
+  else if (loc.city) confidence += 0.08;
   if (confirmationNo) confidence += 0.1;
   if (known) confidence += 0.05;
 
@@ -394,9 +446,9 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
     isHotelConfirmation: true,
     hotelName,
     brand: null,
-    address: addr.full,
-    city: addr.city,
-    country: addr.country,
+    address: loc.address,
+    city: loc.city,
+    country: loc.country,
     checkIn,
     checkOut,
     confirmationNo,

@@ -121,6 +121,28 @@ the Gmail API, obtain a refresh token (read-only scope `gmail.readonly`), and se
 
 Phase 5: CSV/OFX import to flag lodging charges and fill gaps. Not yet built.
 
+## Improving the parser (debug loop)
+
+The parser uses per-provider profiles (Flighty-style) in `lib/parse/senders.ts`
+plus a city gazetteer (`lib/parse/gazetteer.ts`). To improve it against real
+mail, a tester runs:
+
+```bash
+npm run debug-export        # writes hoteli-debug.json (review before sharing!)
+```
+
+`hoteli-debug.json` captures, for each candidate, the subject/sender/headers, a
+body excerpt, and what the parser extracted. Send that file back, then iterate
+locally without their mailbox:
+
+```bash
+npm run debug-replay -- hoteli-debug.json          # re-parse + summary
+npm run debug-replay -- hoteli-debug.json --geo    # also test geocoding
+```
+
+Edit the parser, re-run replay, repeat. `npm run parse-eval` does the same over
+your own local mailbox. `hoteli-debug*.json` is git-ignored (real email content).
+
 ## Parsing modes
 
 Set `PARSER` in `.env`:
