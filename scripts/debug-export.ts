@@ -42,9 +42,21 @@ function* walk(root: string): Generator<string> {
   }
 }
 
+function argVal(name: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
 async function main() {
-  const maxIdx = process.argv.indexOf("--max");
-  const max = maxIdx >= 0 ? Number(process.argv[maxIdx + 1] || 100) : 200;
+  const max = process.argv.includes("--all")
+    ? Infinity
+    : Number(argVal("--max") ?? 200);
+  // Targeted extraction: pull every message matching a sender / subject-or-body
+  // substring (e.g. --from amex, --match "the langham"). Bypasses the keyword
+  // filter so you can grab specific emails the parser currently misses.
+  const fromFilter = argVal("--from")?.toLowerCase();
+  const matchFilter = argVal("--match")?.toLowerCase();
+  const targeted = !!(fromFilter || matchFilter);
   const root = path.join(os.homedir(), "Library", "Mail");
 
   const cases: unknown[] = [];
@@ -58,7 +70,7 @@ async function main() {
     }
     const msg = emlxToRfc822(raw);
     if (!msg) continue;
-    if (!KW.test(msg.subarray(0, 8192).toString("utf8"))) continue;
+    if (!targeted && !KW.test(msg.subarray(0, 8192).toString("utf8"))) continue;
 
     let p;
     try {
@@ -69,6 +81,17 @@ async function main() {
     const html = typeof p.html === "string" ? p.html : "";
     const text = p.text || html.replace(/<[^>]+>/g, " ");
     const headers = pickHeadersFromLines(p.headerLines);
+
+    if (targeted) {
+      const from = (p.from?.text ?? "").toLowerCase();
+      const subj = (p.subject ?? "").toLowerCase();
+      const body = text.toLowerCase();
+      const ok =
+        (!fromFilter || from.includes(fromFilter)) &&
+        (!matchFilter || subj.includes(matchFilter) || body.includes(matchFilter));
+      if (!ok) continue;
+    }
+
     const parsed = extractStayHeuristic({
       subject: p.subject,
       from: p.from?.text,
@@ -78,12 +101,11 @@ async function main() {
       date: p.date?.toISOString(),
     });
 
-    // Keep candidates + near-misses (a date or a lodging hint), skip obvious bulk
-    // non-candidates to keep the file focused.
+    // Default (non-targeted) mode: keep candidates + near-misses only.
     const nearMiss = /\b(check[- ]?in|check[- ]?out|nights?|reservation|hotel|resort)\b/i.test(
       text.slice(0, 2000),
     );
-    if (!parsed.isHotelConfirmation && !nearMiss) continue;
+    if (!targeted && !parsed.isHotelConfirmation && !nearMiss) continue;
 
     cases.push({
       subject: p.subject ?? null,

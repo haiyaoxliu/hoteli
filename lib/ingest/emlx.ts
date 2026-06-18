@@ -14,7 +14,7 @@ import {
 
 // Heuristics to pre-filter candidate confirmations cheaply (before any LLM call).
 const KEYWORDS =
-  /\b(reservation|confirmation|confirmed|booking|itinerary|check[- ]?in|your stay|booking\.com|expedia|hotels?\.com|airbnb|marriott|hilton|hyatt|ihg|accor|radisson|wyndham|best western)\b/i;
+  /\b(reservation|confirmation|confirmed|booking|itinerary|check[- ]?in|check[- ]?out|your stay|nights?|booking\.com|expedia|hotels?\.com|airbnb|vrbo|marriott|hilton|hyatt|ihg|accor|radisson|wyndham|best western|cordis|langham|amex travel|american express|fine hotels|chase travel|capital one travel)\b/i;
 
 /**
  * Decode an Apple Mail .emlx file into a raw RFC822 message buffer.

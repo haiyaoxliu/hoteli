@@ -98,16 +98,34 @@ const DATE_TOKEN = new RegExp(
 );
 const DATE_TOKEN_G = new RegExp(DATE_TOKEN.source, "gi");
 
+/**
+ * Parse one date token to ISO. Numeric d/m/y is ambiguous: `dayFirst` (set for
+ * non-US locations) reads "08/06/2026" as 8 June, not 6 August.
+ */
+function tokenToIso(token: string, dayFirst: boolean): string | null {
+  const sl = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(token.trim());
+  if (sl) {
+    const yy = sl[3].length === 2 ? 2000 + Number(sl[3]) : Number(sl[3]);
+    const mo = dayFirst ? Number(sl[2]) : Number(sl[1]);
+    const d = dayFirst ? Number(sl[1]) : Number(sl[2]);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return `${yy}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+    return null;
+  }
+  const res = chrono.parse(token);
+  return res[0] ? isoFromComponent(res[0].start) : null;
+}
+
 /** First labeled date: scan each label, parse the clean token that follows. */
-function dateNear(text: string, labelSrc: string): string | null {
+function dateNear(text: string, labelSrc: string, dayFirst: boolean): string | null {
   const re = new RegExp(labelSrc, "gi");
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     const after = text.slice(m.index + m[0].length, m.index + m[0].length + 50);
     const dm = DATE_TOKEN.exec(after);
     if (dm) {
-      const res = chrono.parse(dm[0]);
-      const iso = res[0] ? isoFromComponent(res[0].start) : null;
+      const iso = tokenToIso(dm[0], dayFirst);
       if (iso) return iso;
     }
     if (re.lastIndex === m.index) re.lastIndex++;
@@ -154,13 +172,12 @@ function parseSubjectRange(subject: string, year: number): { checkIn: string; ch
   return null;
 }
 
-function allDateTokens(text: string): string[] {
+function allDateTokens(text: string, dayFirst: boolean): string[] {
   const set = new Set<string>();
   let m: RegExpExecArray | null;
   DATE_TOKEN_G.lastIndex = 0;
   while ((m = DATE_TOKEN_G.exec(text))) {
-    const res = chrono.parse(m[0]);
-    const iso = res[0] ? isoFromComponent(res[0].start) : null;
+    const iso = tokenToIso(m[0], dayFirst);
     if (iso) set.add(iso);
   }
   return [...set].sort();
@@ -177,9 +194,10 @@ function extractDates(
   subject: string,
   haystack: string,
   fallbackYear: number,
+  dayFirst: boolean,
 ): { checkIn: string | null; checkOut: string | null } {
-  const ci = dateNear(haystack, CHECKIN_LABEL);
-  const co = dateNear(haystack, CHECKOUT_LABEL);
+  const ci = dateNear(haystack, CHECKIN_LABEL, dayFirst);
+  const co = dateNear(haystack, CHECKOUT_LABEL, dayFirst);
   if (validRange(ci, co)) return { checkIn: ci, checkOut: co };
 
   const sr = parseSubjectRange(subject, fallbackYear);
@@ -192,7 +210,7 @@ function extractDates(
   }
 
   // First ascending pair of body dates within a plausible span.
-  const toks = allDateTokens(haystack);
+  const toks = allDateTokens(haystack, dayFirst);
   for (let i = 0; i < toks.length - 1; i++) {
     if (validRange(toks[i], toks[i + 1])) return { checkIn: toks[i], checkOut: toks[i + 1] };
   }
@@ -427,7 +445,9 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
   const fallbackYear = input.date
     ? new Date(input.date).getFullYear()
     : new Date().getFullYear();
-  const { checkIn, checkOut } = extractDates(subject, haystack, fallbackYear);
+  // Non-US location → interpret ambiguous numeric dates as day-first (DD/MM).
+  const dayFirst = !!findCityCountry(`${subject}\n${bodyText.slice(0, 3000)}`);
+  const { checkIn, checkOut } = extractDates(subject, haystack, fallbackYear, dayFirst);
   const addr = extractAddress(haystack);
   const datePair = validRange(checkIn, checkOut);
 
