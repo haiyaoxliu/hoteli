@@ -190,7 +190,26 @@ function extractNights(text: string): number | null {
   return n > 0 && n <= 60 ? n : null;
 }
 
+/**
+ * Try the preferred date interpretation; if it doesn't yield a valid stay range,
+ * try the other (day-first vs month-first). This rescues ambiguous numeric dates
+ * for locations not in the gazetteer (e.g. "08/01/2026"→"12/01/2026" as 8–12 Jan
+ * rather than an impossible Aug 1 → Dec 1).
+ */
 function extractDates(
+  subject: string,
+  haystack: string,
+  year: number,
+  preferDayFirst: boolean,
+): { checkIn: string | null; checkOut: string | null } {
+  const a = extractDatesOnce(subject, haystack, year, preferDayFirst);
+  if (validRange(a.checkIn, a.checkOut)) return a;
+  const b = extractDatesOnce(subject, haystack, year, !preferDayFirst);
+  if (validRange(b.checkIn, b.checkOut)) return b;
+  return a.checkIn ? a : b;
+}
+
+function extractDatesOnce(
   subject: string,
   haystack: string,
   fallbackYear: number,
@@ -267,11 +286,32 @@ function extractAddress(text: string): Address {
       country: "USA",
     };
   }
+  // Field-labeled format some hotels use: "X (City), Y (Region), Z (Postal),
+  // W (Street)". Parse the components rather than capturing the raw string.
+  if (/\(City\)|\(Street\)/i.test(text)) {
+    const grab = (re: RegExp) => {
+      const m = re.exec(text);
+      return m ? m[1].replace(/^[*\s\-]+/, "").replace(/[*\s]+$/, "").trim() : null;
+    };
+    const city = grab(/([A-Za-z][A-Za-z .'\-]{1,38})\s*\(City\)/i);
+    const street = grab(/([A-Za-z0-9][A-Za-z0-9 .'\-]{1,48})\s*\(Street\)/i);
+    const region = grab(/([A-Za-z][A-Za-z .'\-]{1,38})\s*\(Region/i);
+    const postal = grab(/(\d{3,6})\s*\(Postal\)/i);
+    const full = [street, city, region, postal].filter(Boolean).join(", ");
+    if (full.length >= 6) {
+      return { full, street, city, state: region, postal, country: null };
+    }
+  }
+
   // Labeled fallback (international / non-US) — require it to look like a real
   // address (has a number and a comma) so we don't grab arbitrary sentences.
   const lab = /(?:address|located at|property address)\s*:?\s*([^\n<]{8,90})/i.exec(text);
   if (lab) {
-    const full = lab[1].replace(/\s+/g, " ").trim().replace(/[.,;]+$/, "");
+    const full = lab[1]
+      .replace(/\s+/g, " ")
+      .replace(/^[*\s\-]+/, "")
+      .trim()
+      .replace(/[.,;]+$/, "");
     if (/\d/.test(full) && full.includes(",") && !CORP_ADDR.test(full)) {
       return { full, street: null, city: null, state: null, postal: null, country: null };
     }
@@ -419,7 +459,9 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
   const profile = getProfile(input.from);
   const { channel, known } = profile;
   const bulk = isBulk(input.headers, input.from);
-  const strong = STRONG_LODGING.test(subject) || STRONG_LODGING.test(head1k);
+  const strongSubject = STRONG_LODGING.test(subject);
+  // Body too — used only to avoid wrongly EXCLUDING a real hotel email.
+  const strong = strongSubject || STRONG_LODGING.test(head1k);
 
   // 0) Notifications/messages are never a stay, even when they mention "hotel".
   if (/\b(sent you a message|new message|left (?:you )?a review|message from)\b/i.test(subject)) {
@@ -454,11 +496,15 @@ export function extractStayHeuristic(input: ParseInput): ParsedStay {
   // 3) Require a lodging context. For unknown senders, accept a date-range + a
   // real address only alongside an explicit reservation cue (avoids order/event
   // confirmations that happen to contain a date range and a footer address).
-  const resHint =
+  // For unknown senders the cue must be in the SUBJECT — a body that merely
+  // quotes a hotel address (e.g. a "Re: Lost wallet" support thread) is not a
+  // booking confirmation.
+  const resHintSubject =
     /\b(reservation|booking|your stay|stay at|itinerary|check[\s-]?in|nights?)\b/i.test(
-      subject + "\n" + head1k,
+      subject,
     );
-  const lodging = known || strong || (datePair && !!addr.full && resHint);
+  const lodging =
+    known || strongSubject || (datePair && !!addr.full && resHintSubject);
   if (!lodging) return reject(channel);
 
   // It's a real lodging candidate — extract the rest.
